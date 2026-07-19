@@ -40,9 +40,13 @@ jobs:
 
       - name: Patch ClassiCube.js (Fix missing print error)
         run: |
-          # 1. 注释掉那个会导致崩溃的 forEach 循环，防止它注册那个报错的拦截器
-          sed -i 's/unexportedSymbols.forEach(unexportedRuntimeSymbol);/\/\/ unexportedSymbols.forEach(unexportedRuntimeSymbol);/g' assets/ClassiCube.js
-          # 2. 在文件末尾注入补丁代码，强行给 Module 添加 print 和 printErr 方法
+          node -e '
+            const fs = require("fs");
+            const path = "assets/ClassiCube.js";
+            let code = fs.readFileSync(path, "utf8");
+            code = code.replace("unexportedSymbols.forEach(unexportedRuntimeSymbol);", "// unexportedSymbols.forEach(unexportedRuntimeSymbol);");
+            fs.writeFileSync(path, code, "utf8");
+          '
           echo 'Module["print"] = function(x) { console.log(x); }; Module["printErr"] = function(x) { console.error(x); };' >> assets/ClassiCube.js
 
       - name: Set up Go

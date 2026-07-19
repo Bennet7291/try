@@ -1,0 +1,140 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g., v1.0.0) - REQUIRED if running manually'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Artifacts
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            artifact_name: classicube-launcher-linux-x64
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            artifact_name: classicube-launcher-windows-x64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            artifact_name: classicube-launcher-macos-arm64
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Patch ClassiCube.js (Fix missing print error)
+        run: |
+          # 1. 注释掉那个会导致崩溃的 forEach 循环，防止它注册那个报错的拦截器
+          sed -i 's/unexportedSymbols.forEach(unexportedRuntimeSymbol);/\/\/ unexportedSymbols.forEach(unexportedRuntimeSymbol);/g' assets/ClassiCube.js
+          # 2. 在文件末尾注入补丁代码，强行给 Module 添加 print 和 printErr 方法
+          echo 'Module["print"] = function(x) { console.log(x); }; Module["printErr"] = function(x) { console.error(x); };' >> assets/ClassiCube.js
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Build Binary (Linux & Windows)
+        if: matrix.goos != 'darwin'
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -o classicube-launcher${ext} .
+          
+          mkdir -p build_dir
+          mv classicube-launcher${ext} build_dir/
+          cp -r assets build_dir/
+          
+          cd build_dir
+          zip -r ../${{ matrix.artifact_name }}.zip ./*
+
+      - name: Build macOS App Bundle
+        if: matrix.goos == 'darwin'
+        run: |
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o classicube-launcher .
+          
+          APP_NAME="ClassiCubeLauncher.app"
+          mkdir -p "${APP_NAME}/Contents/MacOS"
+          mkdir -p "${APP_NAME}/Contents/Resources"
+          
+          mv classicube-launcher "${APP_NAME}/Contents/MacOS/ClassiCubeLauncher"
+          
+          cp -r assets "${APP_NAME}/Contents/Resources/"
+          
+          cat <<EOF > "${APP_NAME}/Contents/Info.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>English</string>
+              <key>CFBundleExecutable</key>
+              <string>ClassiCubeLauncher</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.classicube.launcher</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>ClassiCube Launcher</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleSignature</key>
+              <string>????</string>
+          </dict>
+          </plist>
+          EOF
+          
+          zip -r ${{ matrix.artifact_name }}.zip "${APP_NAME}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.zip
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten Artifacts Directory
+        run: |
+          mkdir -p release_assets
+          find artifacts -name "*.zip" -exec cp {} release_assets/ \;
+          ls -R release_assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*.zip
+          generate_release_notes: true
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
